@@ -11,8 +11,8 @@ from festival_finder.projects import Projects, sample_id
 
 @pytest.fixture
 def recovered_app(tmp_path, monkeypatch):
-    from festival_finder import manual_app
-    monkeypatch.setattr(manual_app,'ensure_panel_server',lambda *args:'http://127.0.0.1:8503/')
+    from festival_finder import panel
+    monkeypatch.setattr(panel,'ensure_panel_server',lambda *args:'http://127.0.0.1:8503/')
     monkeypatch.setenv('FIND_MY_DANCE_DATA',str(tmp_path))
     feedback=Feedback(tmp_path/'feedback.sqlite3')
     projects=Projects(feedback.path)

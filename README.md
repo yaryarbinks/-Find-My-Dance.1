@@ -4,7 +4,7 @@ A local festival photo browser with a persistent, photos-only preparation queue 
 
 ## Use the app
 
-Run `start.ps1` in this project folder and open http://127.0.0.1:8501.
+Run `start.ps1` (Windows) or `./start.sh` (macOS) in this project folder and open http://127.0.0.1:8501.
 
 1. Open a saved festival, or expand **Add a festival / refresh its folder tree** and paste its root Google Drive folder link.
 2. Select a folder in the tree. Choose **This folder only**, **This folder and all subfolders**, or **Choose folders inside this branch**.
