@@ -53,3 +53,30 @@ def test_manual_review_keeps_historical_face_decisions(recovered_app):
     assert projects.photo_labels('festival','folder')=={'saved-photo':'not_me'}
     assert feedback.labels()==before
     assert len(projects.confirmed(projects.report('festival','folder'),before))==0
+
+
+def test_folder_page_queues_selected_folder_and_starts_queue(recovered_app, monkeypatch):
+    from festival_finder import drive, scan_queue
+
+    feedback, projects = recovered_app
+    projects.save_folders('festival', [
+        {'id': 'festival', 'parent': None, 'name': 'Festival', 'path': 'Festival'},
+        {'id': 'folder', 'parent': 'festival', 'name': 'Saved folder', 'path': 'Festival / Saved folder'},
+    ])
+    started = []
+    monkeypatch.setattr(drive, 'connect', lambda *args: object())
+    monkeypatch.setattr(scan_queue, 'start_queue',
+                        lambda root, data, config: started.append((root, data, config)))
+    app = AppTest.from_file(Path(__file__).resolve().parents[1] / 'app.py')
+    app.run(timeout=20)
+    next(button for button in app.button if button.label == 'Open saved festival').click().run(timeout=20)
+    app.button(key='tree-select-festival-folder').click().run(timeout=20)
+    next(button for button in app.button
+         if button.label == 'Add selected folder + subfolders').click().run(timeout=20)
+    assert not app.exception
+    queue = scan_queue.read_queue(feedback.path.parent)
+    assert [entry['id'] for entry in queue['entries']] == ['folder']
+    next(button for button in app.button if button.label == 'Start / resume queue').click().run(timeout=20)
+    assert not app.exception
+    assert len(started) == 1
+    assert started[0][2]['festival_id'] == 'festival'

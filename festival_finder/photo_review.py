@@ -11,6 +11,19 @@ def photo_sequence(report):
     return sorted((item for item in report.get('matches', []) if not item.get('video')), key=natural)
 
 
+def media_sequence(report):
+    def natural(item):
+        return tuple((1, int(part)) if part.isdigit() else (0, part.casefold())
+                     for part in re.split(r'(\d+)', item.get('name', '')))
+    return sorted(report.get('matches', []), key=natural)
+
+
+def candidate_similarity(item):
+    scores = [face['score'] for hit in item.get('hits', []) for face in hit.get('faces', [])
+              if face.get('candidate') and isinstance(face.get('score'), (int, float))]
+    return max(scores) if scores else None
+
+
 def nearby_photos(report, confirmed, radius=2):
     sequence = photo_sequence(report)
     anchors = {item['id'] for item in confirmed}
@@ -58,30 +71,73 @@ def render_photo_page(st, projects, feedback, data, root, mode):
     st.metric('Confirmed photos in this festival', len({item['id'] for _, item in confirmed}))
 
     if mode == 'Folder review':
-        available = [r for r in reports if any(not item.get('video') for item in r.get('matches', []))]
+        available = [r for r in reports if r.get('matches')]
         if not available:
-            st.info('No saved photo previews are available for this festival.')
+            st.info('No saved photo or video previews are available for this festival.')
             return
-        options = [r['folder_id'] for r in available]
+        reports_by_folder = {report['folder_id']: report for report in available}
+        options = list(reports_by_folder)
         target = st.session_state.get('manual_review_folder') or st.query_params.get('folder')
-        folder = st.selectbox('Saved result folder', options, index=options.index(target) if target in options else 0,
-                              format_func=lambda fid: names.get(fid, fid), key='saved-review-folder')
-        report = next(r for r in available if r['folder_id'] == folder)
-        photos = photo_sequence(report)
-        view = st.radio('Saved photo view', ['Saved suggestions', 'Photos with detected faces', 'All saved photos', 'Confirmed photos'], horizontal=True)
-        confirmed_ids = {item['id'] for item in projects.confirmed(report, labels)}
-        suggestions = [item for item in photos if any(face.get('candidate', False)
-                        for hit in item.get('hits', []) for face in hit.get('faces', []))]
-        if view == 'Saved suggestions':
-            photos = suggestions
-        elif view == 'Photos with detected faces':
-            photos = [item for item in photos if item.get('detected_faces')]
-        elif view == 'Confirmed photos':
-            photos = [item for item in photos if item['id'] in confirmed_ids]
-        st.caption(f"{report.get('processed', 0)} of {report.get('total_discovered', 0)} files were recorded in this saved report. This view does not run recognition again.")
-        if view == 'Saved suggestions' and not suggestions:
-            st.info('This saved report has no suggested photos. Choose All saved photos to inspect the existing previews.')
-        entries = [(report, item, '') for item in photos]
+        default = [target] if target in reports_by_folder else options
+        selected_folders = st.multiselect(
+            'Folders to review',
+            options,
+            default=default,
+            format_func=lambda fid: names.get(fid, reports_by_folder[fid].get('selected_folder', fid)),
+            key='review-folders')
+        view = st.radio(
+            'Saved result view',
+            ['Saved suggestions', 'All saved media', 'Awaiting review', 'Media with detected faces',
+             'Confirmed photos', 'Not in this photo'],
+            horizontal=True,
+            key='folder-review-view-v2')
+        selected_reports = [reports_by_folder[fid] for fid in selected_folders]
+        entries = []
+        coverage = []
+        for report in sorted(selected_reports, key=lambda row: names.get(row['folder_id'], row.get('selected_folder', ''))):
+            items = media_sequence(report)
+            photo_labels = projects.photo_labels(report['festival_id'], report['folder_id'])
+            confirmed_ids = {item['id'] for item in projects.confirmed(report, labels)}
+            if view == 'Awaiting review':
+                items = [item for item in items if item['id'] not in photo_labels]
+            elif view == 'Saved suggestions':
+                items = [item for item in items if any(
+                    face.get('candidate', False) for hit in item.get('hits', []) for face in hit.get('faces', []))]
+            elif view == 'Media with detected faces':
+                items = [item for item in items if item.get('detected_faces') or any(
+                    hit.get('faces') for hit in item.get('hits', []))]
+            elif view == 'Confirmed photos':
+                items = [item for item in items if item['id'] in confirmed_ids and not item.get('video')]
+            elif view == 'Not in this photo':
+                items = [item for item in items if photo_labels.get(item['id']) == 'not_me']
+            entries.extend((report, item, '') for item in items)
+            all_items = media_sequence(report)
+            coverage.append({
+                'Folder': names.get(report['folder_id'], report.get('selected_folder', report['folder_id'])),
+                'Files checked': f"{report.get('processed', 0)} / {report.get('total_discovered', 0)}",
+                'Saved previews': len(all_items),
+                'Photos': sum(not item.get('video') for item in all_items),
+                'Video previews': sum(bool(item.get('video')) for item in all_items),
+                'Errors': len(report.get('errors', [])),
+            })
+        total_checked = sum(report.get('processed', 0) for report in selected_reports)
+        total_expected = sum(report.get('total_discovered', 0) for report in selected_reports)
+        total_errors = sum(len(report.get('errors', [])) for report in selected_reports)
+        saved_media = sum(len(report.get('matches', [])) for report in selected_reports)
+        suggestion_count = sum(
+            candidate_similarity(item) is not None
+            for report in selected_reports for item in report.get('matches', []))
+        st.caption(f'{len(selected_reports)} of {len(available)} scanned folders selected · '
+                   f'{total_checked} / {total_expected} files checked · {saved_media} saved previews · '
+                   f'{suggestion_count} recognition suggestions · {total_errors} file errors. '
+                   'No scan or download runs from this page.')
+        with st.expander('Scan coverage by folder'):
+            st.dataframe(coverage, hide_index=True, use_container_width=True)
+        if not selected_reports:
+            st.info('Select one or more folders to review.')
+            return
+        if not entries:
+            st.info('No saved media matches this review view in the selected folders. Recognition suggestions show only faces above the selected similarity cutoff.')
     elif mode == 'Confirmed photos':
         st.caption('Your confirmed collection across all saved folders. Originals stay in Drive until you request a download.')
         items = list({item['id']: item for _, item in confirmed if item.get('url')}.values())
@@ -100,7 +156,7 @@ def render_photo_page(st, projects, feedback, data, root, mode):
             st.download_button('Download confirmed originals ZIP', target.read_bytes(), 'my-confirmed-photos.zip', 'application/zip')
         entries = [(report, item, '') for report, item in confirmed]
     else:
-        st.caption('Two photos before and two after each confirmed photo, ordered by filename within the same folder. This is approximate sequence order, not verified capture time. New confirmations can reveal further neighbors.')
+        st.caption('Two photos before and two after each confirmed photo, ordered by filename within the same folder. Confirming a nearby photo expands the review around it, so you can keep following the sequence. Rejected photos stay marked for reference but do not expand it. This is approximate filename order, not verified capture time.')
         available = [report for report in reports if projects.confirmed(report, labels)]
         if not available:
             st.info('Confirm a photo first to use it as a starting point.')
@@ -123,34 +179,42 @@ def render_photo_page(st, projects, feedback, data, root, mode):
     if not entries:
         st.info('No photos in this view yet.')
         return
-    page = st.number_input('Review page (12 photos)', 1, max(1, (len(entries)+11)//12), 1, key=f'review-page-{mode}-{len(entries)}')
+    st.caption(f'{len(entries)} item(s) in this view · {(len(entries)+11)//12} review page(s) at 12 per page.')
+    page = st.number_input('Review page (12 items)', 1, max(1, (len(entries)+11)//12), 1, key=f'review-page-{mode}-{len(entries)}')
     for report, item, context in entries[(page-1)*12:page*12]:
         festival_id, folder_id = report['festival_id'], report['folder_id']
         with st.container(border=True):
             label = projects.photo_labels(festival_id, folder_id).get(item['id'])
             widget = f"photo-{mode}-{festival_id}-{folder_id}-{item['id']}"
             preview = next((hit['preview'] for hit in item.get('hits', []) if Path(hit.get('preview', '')).is_file()), None)
-            if label == 'not_me':
+            if label in {'me', 'not_me'}:
                 thumb, title, undo = st.columns([1, 4, 2])
                 if preview:
                     thumb.image(preview, width=96)
                 title.write(f"**{item['name']}**")
-                title.caption('✓ Saved: not in this photo')
+                title.caption('✓ Saved: you are in this photo' if label == 'me'
+                              else '✓ Saved: not in this photo')
                 if undo.button('Undo', key=f'{widget}-compact-undo'):
                     projects.review_photo(festival_id, folder_id, item['id'], None)
                     st.session_state['photo-review-notice'] = f"Undone: {item['name']}"
                     st.rerun()
-                with st.expander('Reopen rejected photo'):
+                with st.expander('Reopen confirmed photo' if label == 'me' else 'Reopen rejected photo'):
                     if preview:
                         st.image(preview, width=640)
                     if item.get('url'):
                         st.link_button('View original in Drive', item['url'])
-                    if st.button("I'm in this photo instead", key=f'{widget}-correct-me'):
-                        projects.review_photo(festival_id, folder_id, item['id'], 'me')
-                        st.session_state['photo-review-notice'] = f"Saved: {item['name']} — you are in this photo."
+                    replacement = 'not_me' if label == 'me' else 'me'
+                    action = 'Not in this photo' if label == 'me' else "I'm in this photo instead"
+                    if st.button(action, key=f'{widget}-correct-{replacement}'):
+                        projects.review_photo(festival_id, folder_id, item['id'], replacement)
+                        decision = 'not in this photo' if replacement == 'not_me' else 'you are in this photo'
+                        st.session_state['photo-review-notice'] = f"Saved: {item['name']} — {decision}."
                         st.rerun()
                 continue
             st.subheader(item['name'])
+            similarity = candidate_similarity(item)
+            if similarity is not None:
+                st.caption(f'Recognition suggestion · similarity {similarity:.2f} (not a probability)')
             if label == 'me':
                 st.success('✓ Saved — you confirmed you are in this photo')
             st.caption(names.get(folder_id, folder_id))

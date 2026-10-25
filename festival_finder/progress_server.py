@@ -57,19 +57,23 @@ COMPACT_HTML = '''<!doctype html><html><head><meta charset="utf-8"><meta name="v
 <div title="Photos you manually confirmed in this scan folder"><div class="label">Confirmed by you</div><div id="confirmed" class="value">—</div></div>
 </section><div class="track" role="progressbar" aria-label="Scan progress" aria-valuemin="0" aria-valuemax="100"><div id="bar" class="bar"></div></div>
 <script>
-let busy=false;
+let busy=false;let progressState=null;
 function text(id,value){const node=document.getElementById(id);const next=String(value);if(node.textContent!==next)node.textContent=next;}
+function duration(seconds){const total=Math.max(0,Math.ceil(seconds));const hours=Math.floor(total/3600),minutes=Math.floor(total%3600/60),remainder=total%60;return hours?hours+'h '+minutes+'m':minutes+'m '+remainder+'s';}
+function renderEta(){if(!progressState)return;const elapsed=(performance.now()-progressState.receivedAt)/1000;const data=progressState.data;
+ let eta=data.finished?'Completed':data.stopped?'Estimate unavailable — scan stopped':data.remaining_seconds==null?'Estimating finish…':'≈ '+duration(data.remaining_seconds-elapsed)+' left';
+ const finish=new Date(data.estimated_finish);if(!data.finished&&!data.stopped&&data.estimated_finish&&!Number.isNaN(finish.getTime()))eta+=' · finish '+new Intl.DateTimeFormat('en-GB',{hour:'2-digit',minute:'2-digit',timeZone:'Asia/Jerusalem'}).format(finish);
+ text('eta',eta);document.getElementById('eta').title=eta+' (finish time in Israel)';
+}
 async function update(){if(busy)return;busy=true;try{
  const response=await fetch('/progress',{cache:'no-store'});if(!response.ok)throw Error();const data=await response.json();
  text('status',data.status.replace(' — you can use other tabs',''));text('folder',data.folder.split(' / ').slice(-3).join(' / '));document.getElementById('folder').title=data.folder;
  text('checked',data.processed+' / '+data.total);text('possible',data.possible);text('confirmed',data.confirmed);
  text('checked-label',data.checked_label||'Checked');text('possible-label',data.possible_label||'Possible matches');
- let eta=data.finished?'Completed':data.stopped?'Estimate unavailable — scan stopped':data.remaining_seconds==null?'Estimating finish…':'≈ '+data.remaining_text+' left';
- const finish=new Date(data.estimated_finish);if(!data.finished&&!data.stopped&&data.estimated_finish&&!Number.isNaN(finish.getTime()))eta+=' · finish '+new Intl.DateTimeFormat('en-GB',{hour:'2-digit',minute:'2-digit',timeZone:'Asia/Jerusalem'}).format(finish);
- text('eta',eta);document.getElementById('eta').title=eta+' (finish time in Israel)';
+ progressState={data,receivedAt:performance.now()};renderEta();
  const width=data.total?Math.min(100,100*data.processed/data.total):0;const bar=document.getElementById('bar');bar.style.width=width+'%';bar.parentElement.setAttribute('aria-valuenow',Math.round(width));
  }catch(error){text('status','Progress reconnecting…');}finally{busy=false;}}
-update();setInterval(update,5000);
+update();setInterval(update,5000);setInterval(renderEta,1000);
 </script></body></html>'''
 
 
@@ -114,23 +118,26 @@ def snapshot(data):
 
 
 def handler(data):
+    identity = hashlib.sha256(str(Path(data).resolve()).casefold().encode()).hexdigest()
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
         def do_GET(self):
             # Bind locally and reject cross-site browser fetches. The iframe uses same-origin requests.
-            if self.headers.get('Sec-Fetch-Site') == 'cross-site' and self.path != '/':
+            path = urlparse(self.path).path
+            if self.headers.get('Sec-Fetch-Site') == 'cross-site' and path not in {'/', '/compact'}:
                 self.send_error(403)
                 return
             try:
-                if self.path == '/health':
-                    body, kind = b'OK', 'text/plain'
-                elif self.path == '/':
+                if path == '/health':
+                    body, kind = identity.encode(), 'text/plain'
+                elif path == '/':
                     body, kind = HTML.encode(), 'text/html; charset=utf-8'
-                elif urlparse(self.path).path == '/compact':
+                elif path == '/compact':
                     body, kind = COMPACT_HTML.encode(), 'text/html; charset=utf-8'
-                elif self.path == '/progress':
+                elif path == '/progress':
                     payload, _ = snapshot(data)
                     body, kind = json.dumps(payload).encode(), 'application/json'
                 elif self.path.startswith('/preview/'):
@@ -156,4 +163,5 @@ def handler(data):
 
 
 if __name__ == '__main__':
-    ThreadingHTTPServer(('127.0.0.1', 8503), handler(Path(sys.argv[1]))).serve_forever()
+    port = int(sys.argv[2]) if len(sys.argv) > 2 else 8503
+    ThreadingHTTPServer(('127.0.0.1', port), handler(Path(sys.argv[1]))).serve_forever()

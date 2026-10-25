@@ -50,6 +50,81 @@ def test_reviewed_neighbor_remains_visible_as_an_anchor():
     assert [row['item']['id'] for row in rows] == ['0', '1', '3', '4', '5']
 
 
+def test_confirmed_neighbors_expand_review_but_rejected_neighbors_do_not():
+    photos = [{'id': str(i), 'name': f'{i}.jpg'} for i in range(13)]
+    report = {'matches': photos}
+
+    first_review = nearby_review_rows(report, [photos[4]], {})
+    assert {row['item']['id'] for row in first_review} == {'2', '3', '5', '6'}
+
+    expanded_review = nearby_review_rows(report, [photos[4], photos[6]], {'6': 'me'})
+    assert {row['item']['id'] for row in expanded_review} == {'2', '3', '5', '6', '7', '8'}
+
+    after_rejection = nearby_review_rows(
+        report, [photos[4], photos[6]], {'6': 'me', '8': 'not_me'})
+    assert {row['item']['id'] for row in after_rejection} == {'2', '3', '5', '6', '7', '8'}
+    assert not {'9', '10'} & {row['item']['id'] for row in after_rejection}
+
+
+def test_folder_review_defaults_to_all_scanned_folders_and_can_filter(tmp_path):
+    from streamlit.testing.v1 import AppTest
+
+    database = tmp_path / 'feedback.sqlite3'
+    feedback = Feedback(database)
+    projects = Projects(database)
+    projects.register({'id': 'festival', 'name': 'Test festival'})
+    projects.save_folders('festival', [
+        {'id': 'festival', 'parent': None, 'name': 'Festival', 'path': 'Festival'},
+        {'id': 'folder-a', 'parent': 'festival', 'name': 'Folder A', 'path': 'Festival / Folder A'},
+        {'id': 'folder-b', 'parent': 'festival', 'name': 'Folder B', 'path': 'Festival / Folder B'},
+    ])
+    for folder, photo, video in [
+        ('folder-a', {'id': 'photo-a', 'name': 'photo-a.jpg',
+                      'hits': [{'timestamp': None, 'faces': [
+                          {'candidate': True, 'score': 0.71, 'box': [0, 0, 10, 10]}]}]}, None),
+        ('folder-b', {'id': 'photo-b', 'name': 'photo-b.jpg',
+                      'hits': [{'timestamp': None, 'faces': [
+                          {'candidate': False, 'score': 0.35, 'box': [0, 0, 10, 10]}]}]},
+         {'id': 'video-b', 'name': 'video-b.mp4', 'video': True, 'hits': []}),
+    ]:
+        items = [photo] + ([video] if video else [])
+        projects.archive('festival', folder, {
+            'matches': items, 'processed': len(items), 'total_discovered': len(items),
+            'errors': [], 'finished': True,
+        })
+    script = f'''
+from pathlib import Path
+import streamlit as st
+from festival_finder.feedback import Feedback
+from festival_finder.projects import Projects
+from festival_finder.photo_review import render_photo_page
+data = Path({str(tmp_path)!r})
+feedback = Feedback(data / 'feedback.sqlite3')
+render_photo_page(st, Projects(feedback.path), feedback, data, data, 'Folder review')
+'''
+    app = AppTest.from_string(script).run()
+
+    assert not app.exception
+    assert app.multiselect(key='review-folders').value == ['folder-a', 'folder-b']
+    assert app.radio(key='folder-review-view-v2').value == 'Saved suggestions'
+    assert {item.value for item in app.subheader} == {'photo-a.jpg'}
+    assert any('1 recognition suggestions' in item.value for item in app.caption)
+    assert any('similarity 0.71 (not a probability)' in item.value for item in app.caption)
+    assert any('1 item(s) in this view · 1 review page(s)' in item.value for item in app.caption)
+
+    app.radio(key='folder-review-view-v2').set_value('All saved media').run()
+    assert not app.exception
+    assert {item.value for item in app.subheader} >= {'photo-a.jpg', 'photo-b.jpg', 'video-b.mp4'}
+    assert any('2 of 2 scanned folders selected · 3 / 3 files checked · 3 saved previews' in item.value
+               for item in app.caption)
+
+    app.multiselect(key='review-folders').set_value(['folder-b']).run()
+    app.radio(key='folder-review-view-v2').set_value('All saved media').run()
+    assert not app.exception
+    assert {item.value for item in app.subheader} >= {'photo-b.jpg', 'video-b.mp4'}
+    assert 'photo-a.jpg' not in {item.value for item in app.subheader}
+
+
 def test_review_buttons_show_saved_state_and_compact_rejection(tmp_path):
     from streamlit.testing.v1 import AppTest
 
@@ -77,12 +152,19 @@ render_photo_page(st, Projects(feedback.path), feedback, data, data, 'Nearby pho
     prefix = 'photo-Nearby photos-festival-bob-0'
     app.button(key=f'{prefix}-me').click().run()
     assert not app.exception
-    assert app.button(key=f'{prefix}-me').label == '✓ Confirmed'
-    assert app.button(key=f'{prefix}-me').disabled
+    assert any(expander.label == 'Reopen confirmed photo' for expander in app.expander)
+    assert app.button(key=f'{prefix}-compact-undo').label == 'Undo'
     assert any('Saved: 0.jpg' in notice.value for notice in app.success)
     assert projects.photo_labels('festival', 'bob')['0'] == 'me'
-    app.button(key=f'{prefix}-not_me').click().run()
+    app.button(key=f'{prefix}-compact-undo').click().run()
     assert not app.exception
+    assert '0' not in projects.photo_labels('festival', 'bob')
+    assert not app.button(key=f'{prefix}-me').disabled
+    app.button(key=f'{prefix}-me').click().run()
+    assert not app.exception
+    app.button(key=f'{prefix}-correct-not_me').click().run()
+    assert not app.exception
+    assert projects.photo_labels('festival', 'bob')['0'] == 'not_me'
     assert any(expander.label == 'Reopen rejected photo' for expander in app.expander)
     assert any('Saved: not in this photo' in caption.value for caption in app.caption)
     assert not any(button.key == f'{prefix}-me' for button in app.button)

@@ -1,27 +1,26 @@
 # Find My Dance
 
-A local festival photo browser with a persistent, photos-only preparation queue and manual review. The current app prepares small Google Drive thumbnails; it does not run face identification or score people.
+A local festival photo browser with manual review and an optional sequential scan queue. Scans use small Google Drive previews for photos and video cover thumbnails; originals are not downloaded during scanning.
 
 ## Use the app
 
 Run `start.ps1` (Windows) or `./start.sh` (macOS) in this project folder and open http://127.0.0.1:8501.
 
 1. Open a saved festival, or expand **Add a festival / refresh its folder tree** and paste its root Google Drive folder link.
-2. Select a folder in the tree. Choose **This folder only**, **This folder and all subfolders**, or **Choose folders inside this branch**.
-3. Click **Add to photo queue**, then **Start / resume preparation queue**. Alternatively, **Add and start preparation** does both.
-4. The worker prepares one folder at a time in queue order. Photos only: video files are ignored. Empty parent folders finish without downloading media.
-5. Open **Review folder** beside a queue entry, or use **Folder review**. Mark whole photos **I'm in this photo**, **Not in this photo**, or undo the decision. Decisions save immediately.
-6. **Confirmed photos** collects your saved confirmations for the festival. Request an original-quality ZIP when ready; photographer download restrictions are respected.
+2. Select a folder in the tree. **Add selected folder + subfolders** adds that folder and every descendant to the scan queue. Multiple selections can be added; duplicates are ignored.
+3. Click **Start / resume queue**. A separate worker scans queued folders one at a time and continues if you close the browser. Add a reference photo first.
+4. Each queued folder scans its photos and videos directly inside it. Video scans use Google Drive's cover/thumbnail preview. Empty folders are recorded and skipped.
+5. **Folder review** selects all scanned folders by default and starts with **Saved suggestions**—only media with a face above the similarity cutoff. Similarity scores are shown as suggestions, not probabilities. Use **All saved media** only if you intentionally want every scanned preview. **Nearby photos** and **Confirmed photos** are also available. Manual photo decisions save immediately.
 
-The queue is restricted to the selected branch of the loaded festival tree. To queue an entire festival, select its root. To queue one day, select that day. Duplicated queue entries are not added again. Failed entries offer **Retry failed preparation**, which keeps successfully prepared files.
+The **Rescan completed files** option applies to queued folders too. Failed folders remain visible and are retried when you start the queue again.
 
 ## Background work and recovery
 
-A separate, windowless Python worker processes the queue. An exclusive operating-system lock prevents simultaneous preparation workers. Closing the browser does not cancel preparation, but the computer must remain on.
+A separate, windowless Python worker processes the queue sequentially. Closing the browser does not cancel processing, but the computer must remain on.
 
-Each photo's metadata and preview location are checkpointed in SQLite. **Pause after current photo** pauses between files. **Start / resume preparation queue** continues saved work after a pause or process interruption. With the queue enabled, the open folder page can restart an unexpectedly exited preparation worker. Folder-listing failures and individual thumbnail errors are shown; failed entries require retry rather than being silently marked ready.
+Folder scans run independently of the browser and process one folder at a time. Closing the browser does not cancel a scan, but the computer must remain on. If the queue worker stops unexpectedly, queued folders remain saved; starting the queue again resumes pending folders and retries failures. Individual file and folder errors are shown in the queue or saved scan report.
 
-The top strip shows previews ready, photos awaiting manual review, confirmations for the current folder, and an estimated finish time in Israel. Its read-only service updates every five seconds without starting processing or fetching extra images. It clears the settings sidebar when open. The queue list also refreshes every five seconds on the folder page.
+The top strip shows previews ready, photos awaiting manual review, confirmations for the current folder, and an estimated finish time in Israel. Its read-only service refreshes scan data every five seconds and updates the estimated time every second without starting processing or fetching extra images. It clears the settings sidebar when open. The queue list also refreshes every five seconds on the folder page.
 
 Green tree cards mean preview preparation is complete for that folder or all its leaf folders; green does not mean every photo has been manually reviewed. Legacy completed scan folders also retain their saved completion state.
 
@@ -31,7 +30,7 @@ Historical reports, confirmations, face-review annotations, reference uploads, o
 
 A local backup of the previous app and database was saved under `data/backups/` when the app was replaced. Backups remain private local files.
 
-**Nearby photos** shows two saved photos before and two after confirmed photos in the same folder, ordered by filename. It defaults to all saved folders with confirmations. New human confirmations are included when opening or reviewing that page. Filename order is approximate and does not guarantee actual capture order.
+**Nearby photos** shows two saved photos before and two after confirmed photos in the same folder, ordered by filename. Confirming a nearby photo makes it a new anchor and reveals its neighbors, so you can continue through the sequence. Confirmed and rejected cards collapse to thumbnails to leave room for more photos; reopen a card to see the full preview or change/undo its decision. Rejected photos remain marked but do not reveal further neighbors. The page defaults to all saved folders with confirmations. Filename order is approximate and does not guarantee actual capture order.
 
 Photos rejected during manual review shrink to small cards in **All photos** or **Rejected** views. **Awaiting review** shows only undecided photos, so a saved decision moves a photo out of that view. Decisions apply to a whole photo and do not create face references.
 

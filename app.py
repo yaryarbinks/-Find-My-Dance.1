@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 import streamlit as st
 
-from festival_finder import drive, engine, feedback, jobs, panel
+from festival_finder import drive, engine, feedback, jobs, panel, scan_queue
 from festival_finder.explainer import render_explainer
 from festival_finder.photo_review import render_photo_page
 from festival_finder.projects import Projects, sample_id
@@ -131,7 +131,7 @@ def job_report(job):
     return json.loads(path.read_text(encoding='utf-8')) if path.exists() else None
 
 
-st.caption('Pick a festival folder, then scan the photos directly inside it. Matching runs on this computer using small Drive previews.')
+st.caption('Pick a festival folder to scan its photos and videos directly. Scanning runs on this computer using small Google Drive previews.')
 festivals = projects.festivals()
 if festivals:
     saved_column, open_column = st.columns([3, 1], vertical_alignment='bottom')
@@ -154,6 +154,8 @@ with st.expander('Add a festival / refresh its folder tree', expanded=not festiv
 
 job = jobs.current_job(DATA)
 running = bool(job and job['status'] in {'starting', 'running'})
+folder_queue = scan_queue.queue_status(DATA)
+queue_running = folder_queue.get('status') in {'starting', 'running'}
 if state.get('pending') and job and not running:
     festival_id, folder_id = state.pop('pending')
     if job['status'] == 'finished':
@@ -176,6 +178,23 @@ if running:
         if live.get('matches') and st.button('Show results so far'):
             state['report'] = live
     scan_progress()
+if queue_running:
+    @st.fragment(run_every=5)
+    def queue_progress():
+        current_queue = scan_queue.queue_status(DATA)
+        if current_queue.get('status') not in {'starting', 'running'}:
+            st.rerun(scope='app')
+        entries = current_queue.get('entries', [])
+        completed = sum(entry.get('status') == 'completed' for entry in entries)
+        failed = sum(entry.get('status') == 'failed' for entry in entries)
+        current = next((entry for entry in entries if entry.get('id') == current_queue.get('current')), None)
+        message = f"Folder queue: {completed} / {len(entries)} folders completed"
+        if current:
+            message += f" · scanning {current['path']}"
+        if failed:
+            message += f" · {failed} failed"
+        st.info(message)
+    queue_progress()
 
 festival_id = state.get('festival')
 if festival_id not in {f['id'] for f in festivals}:
@@ -187,9 +206,58 @@ with st.expander('Festival folder tree', expanded=True):
     render_folder_tree(st, festival_id, projects.checklist(festival_id), folder and folder['id'], select_folder)
 if not folder:
     st.stop()
+
+st.subheader('Folder scan queue')
+st.caption('Add a folder to include it and all its subfolders. The queue scans folders one at a time, including photos and video cover previews.')
+queue_columns = st.columns(3)
+if queue_columns[0].button('Add selected folder + subfolders', disabled=queue_running):
+    try:
+        folder_queue = scan_queue.add_folders(
+            DATA, projects.folders(festival_id), folder['id'], rescan=bool(state.get('rescan')))
+        st.success('Added folders to the scan queue.')
+        st.rerun()
+    except Exception as exc:
+        st.error(str(exc))
+queue_can_start = any(entry.get('status') in {'pending', 'failed'}
+                      for entry in folder_queue.get('entries', []))
+if queue_columns[1].button('Start / resume queue', type='primary',
+                           disabled=queue_running or running or not queue_can_start):
+    try:
+        positives = np.vstack([bank.reference_examples(), bank.examples('me')])
+        if not len(positives):
+            raise ValueError('Add at least one reference photo of yourself in the sidebar first.')
+        with st.spinner('Preparing the folder scan queue…'):
+            drive.connect(ROOT / 'credentials.json', DATA / 'token.json')
+            scan_queue.start_queue(ROOT, DATA, {
+                'festival_id': festival_id, 'references': positives.tolist(),
+                'negatives': bank.examples('not_me').tolist(),
+                'threshold': float(state['threshold']), 'interval': 1.0,
+                'force': bool(state.get('rescan'))})
+        st.rerun()
+    except Exception as exc:
+        st.error(str(exc))
+if queue_columns[2].button('Clear queue', disabled=queue_running or not folder_queue.get('entries')):
+    try:
+        scan_queue.clear_queue(DATA)
+        st.rerun()
+    except Exception as exc:
+        st.error(str(exc))
+folder_queue = scan_queue.queue_status(DATA)
+if folder_queue.get('entries'):
+    status_label = folder_queue.get('status', 'queued').replace('_', ' ').title()
+    st.caption(f'{status_label} · {len(folder_queue["entries"])} folder(s)')
+    with st.expander('Show queued folders'):
+        for entry in folder_queue['entries']:
+            detail = f"{entry['status'].replace('_', ' ').title()} · {entry['path']}"
+            if entry.get('error'):
+                detail += f" · {entry['error']}"
+            elif entry.get('result'):
+                detail += f" · {entry['result']}"
+            st.caption(detail)
+
 st.subheader(folder['path'])
 st.caption('Only photos and videos directly inside this folder are checked; subfolders are not included. Videos use their cover thumbnail.')
-if st.button('Find my photos and videos', type='primary', disabled=running):
+if st.button('Find my photos and videos', type='primary', disabled=running or queue_running):
     try:
         with st.spinner('Listing files and starting the background scan…'):
             find_photos(festival_id, folder)

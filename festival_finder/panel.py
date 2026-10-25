@@ -1,27 +1,52 @@
 """Launch the local read-only progress panel without a console window."""
+import hashlib
 import os
+import socket
 import subprocess
 import sys
 import time
 import urllib.request
 from pathlib import Path
 
-URL = 'http://127.0.0.1:8503/'
+DEFAULT_PORT = 8503
 
 
-def healthy():
+def _identity(data):
+    canonical = str(Path(data).resolve()).casefold().encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _url(port):
+    return f'http://127.0.0.1:{port}/'
+
+
+def healthy(data, port):
     try:
-        with urllib.request.urlopen(URL+'health', timeout=.3) as response:
-            return response.status == 200
+        with urllib.request.urlopen(_url(port)+'health', timeout=.3) as response:
+            return response.status == 200 and response.read().decode() == _identity(data)
     except OSError:
         return False
 
 
+def _available_port():
+    with socket.socket() as server:
+        server.bind(('127.0.0.1', 0))
+        return server.getsockname()[1]
+
+
 def ensure_panel_server(root, data):
-    if healthy():
-        return URL
     root, data = Path(root).resolve(), Path(data).resolve()
     data.mkdir(parents=True, exist_ok=True)
+    port_file = data / 'panel-server-port'
+    try:
+        port = int(port_file.read_text())
+    except (OSError, ValueError):
+        port = None
+    for candidate in (port, DEFAULT_PORT):
+        if candidate and healthy(data, candidate):
+            port_file.write_text(str(candidate))
+            return _url(candidate)
+
     lock = data / 'panel-launch.lock'
     try:
         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -30,6 +55,8 @@ def ensure_panel_server(root, data):
     if fd is not None:
         os.close(fd)
         try:
+            port = _available_port()
+            port_file.write_text(str(port))
             executable = Path(sys.executable)
             options = {'cwd': str(root), 'stdin': subprocess.DEVNULL, 'close_fds': True}
             if os.name == 'nt':
@@ -42,14 +69,18 @@ def ensure_panel_server(root, data):
             else:
                 options['start_new_session'] = True
             with (data / 'panel-server.log').open('ab') as output:
-                process = subprocess.Popen([str(executable), '-m', 'festival_finder.progress_server', str(data)],
+                process = subprocess.Popen([str(executable), '-m', 'festival_finder.progress_server', str(data), str(port)],
                                            stdout=output, stderr=subprocess.STDOUT, **options)
             (data / 'panel-server.pid').write_text(str(process.pid))
         finally:
             lock.unlink(missing_ok=True)
     deadline = time.monotonic()+8
     while time.monotonic()<deadline:
-        if healthy():
-            return URL
+        try:
+            port = int(port_file.read_text())
+        except (OSError, ValueError):
+            port = None
+        if port and healthy(data, port):
+            return _url(port)
         time.sleep(.1)
-    return URL
+    raise RuntimeError(f'Could not start the progress panel for {data}. See {data / "panel-server.log"}.')

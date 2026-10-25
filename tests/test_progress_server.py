@@ -32,8 +32,13 @@ def test_panel_api_updates_without_page_reload_and_exposes_no_files(tmp_path):
         assert 'Live scan status' in compact
         assert 'Confirmed by you' in compact and 'Possible matches' in compact and 'Checked' in compact
         assert 'setInterval(update,5000)' in compact
+        assert 'setInterval(renderEta,1000)' in compact
+        assert 'function duration(seconds)' in compact
         assert 'location.reload' not in compact and '<img' not in compact
         assert 'id="eta"' in compact and "timeZone:'Asia/Jerusalem'" in compact
+        request = urllib.request.Request(url + '/compact?layout=2', headers={'Sec-Fetch-Site': 'cross-site'})
+        with urllib.request.urlopen(request) as response:
+            assert response.status == 200
         with urllib.request.urlopen(url + '/progress') as response:
             values = json.load(response)
             assert values['processed'] == 100
@@ -51,6 +56,23 @@ def test_panel_api_updates_without_page_reload_and_exposes_no_files(tmp_path):
         with pytest.raises(urllib.error.HTTPError) as error:
             urllib.request.urlopen(request)
         assert error.value.code == 403
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_panel_health_rejects_a_different_data_directory(tmp_path):
+    from festival_finder import panel
+
+    data = tmp_path / 'current-project'
+    other_data = tmp_path / 'other-project'
+    server = ThreadingHTTPServer(('127.0.0.1', 0), handler(data))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        assert panel.healthy(data, port)
+        assert not panel.healthy(other_data, port)
     finally:
         server.shutdown()
         server.server_close()
