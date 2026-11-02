@@ -1,6 +1,8 @@
 """Read-only progress API and a stable browser panel with incremental DOM updates."""
 import hashlib
+import ipaddress
 import json
+import socket
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -10,6 +12,17 @@ from urllib.parse import urlparse
 from festival_finder.jobs import current_job
 from festival_finder.live import read_snapshot, live_stats
 from festival_finder.timing import duration_text
+
+
+class LoopbackHTTPServer(ThreadingHTTPServer):
+    def __init__(self, address, request_handler, host):
+        self.address_family = socket.AF_INET6 if ':' in host else socket.AF_INET
+        super().__init__(address, request_handler)
+
+    def server_bind(self):
+        if self.address_family == socket.AF_INET6:
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        super().server_bind()
 
 
 HTML = '''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -164,4 +177,7 @@ def handler(data):
 
 if __name__ == '__main__':
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 8503
-    ThreadingHTTPServer(('127.0.0.1', port), handler(Path(sys.argv[1]))).serve_forever()
+    host = sys.argv[3] if len(sys.argv) > 3 else '127.0.0.1'
+    if host != 'localhost' and not ipaddress.ip_address(host).is_loopback:
+        raise ValueError('The progress server must bind to a loopback address.')
+    LoopbackHTTPServer((host, port), handler(Path(sys.argv[1])), host).serve_forever()

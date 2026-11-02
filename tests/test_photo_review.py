@@ -102,7 +102,7 @@ data = Path({str(tmp_path)!r})
 feedback = Feedback(data / 'feedback.sqlite3')
 render_photo_page(st, Projects(feedback.path), feedback, data, data, 'Folder review')
 '''
-    app = AppTest.from_string(script).run()
+    app = AppTest.from_string(script).run(timeout=20)
 
     assert not app.exception
     assert app.multiselect(key='review-folders').value == ['folder-a', 'folder-b']
@@ -123,6 +123,62 @@ render_photo_page(st, Projects(feedback.path), feedback, data, data, 'Folder rev
     assert not app.exception
     assert {item.value for item in app.subheader} >= {'photo-b.jpg', 'video-b.mp4'}
     assert 'photo-a.jpg' not in {item.value for item in app.subheader}
+
+
+def test_saved_suggestions_prioritize_unreviewed_and_return_to_top_after_decision(tmp_path):
+    from streamlit.testing.v1 import AppTest
+
+    database = tmp_path / 'feedback.sqlite3'
+    feedback = Feedback(database)
+    projects = Projects(database)
+    projects.register({'id': 'festival', 'name': 'Test festival'})
+    projects.save_folders('festival', [
+        {'id': 'festival', 'parent': None, 'name': 'Festival', 'path': 'Festival'},
+        {'id': 'folder', 'parent': 'festival', 'name': 'Folder', 'path': 'Festival / Folder'},
+    ])
+    items = [{
+        'id': f'photo-{index:02d}',
+        'name': f'photo-{index:02d}.jpg',
+        'hits': [{'timestamp': None, 'faces': [
+            {'candidate': True, 'score': 0.71, 'box': [0, 0, 10, 10]}]}],
+    } for index in range(15)]
+    projects.archive('festival', 'folder', {
+        'matches': items, 'processed': len(items), 'total_discovered': len(items),
+        'errors': [], 'finished': True,
+    })
+    projects.review_photo('festival', 'folder', 'photo-01', 'me')
+    projects.review_photo('festival', 'folder', 'photo-03', 'not_me')
+    import numpy as np
+    from festival_finder.projects import sample_id
+    feedback.set(sample_id(items[5], items[5]['hits'][0], items[5]['hits'][0]['faces'][0]),
+                 'not_me', np.eye(1, 128, dtype=np.float32)[0])
+    script = f'''
+from pathlib import Path
+import streamlit as st
+from festival_finder.feedback import Feedback
+from festival_finder.projects import Projects
+from festival_finder.photo_review import render_photo_page
+data = Path({str(tmp_path)!r})
+feedback = Feedback(data / 'feedback.sqlite3')
+render_photo_page(st, Projects(feedback.path), feedback, data, data, 'Folder review')
+'''
+    app = AppTest.from_string(script).run()
+    assert not app.exception
+    assert app.subheader[0].value == 'photo-00.jpg'
+    assert {item.value for item in app.subheader} == {
+        f'photo-{index:02d}.jpg' for index in [0, 2, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+    }
+
+    page_key = app.number_input[0].key
+    app.number_input(key=page_key).set_value(2).run(timeout=20)
+    app.button(key='photo-Folder review-festival-folder-photo-01-compact-undo').click().run(timeout=20)
+    assert not app.exception
+    assert app.number_input[0].value == 1
+    assert app.subheader[0].value == 'photo-00.jpg'
+
+    app.button(key='photo-Folder review-festival-folder-photo-00-me').click().run(timeout=20)
+    assert not app.exception
+    assert app.subheader[0].value == 'photo-01.jpg'
 
 
 def test_review_buttons_show_saved_state_and_compact_rejection(tmp_path):

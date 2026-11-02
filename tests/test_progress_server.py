@@ -78,6 +78,23 @@ def test_panel_health_rejects_a_different_data_directory(tmp_path):
         server.server_close()
 
 
+def test_panel_uses_the_browser_loopback_host(tmp_path):
+    from festival_finder import panel
+    from festival_finder.progress_server import LoopbackHTTPServer
+
+    assert panel.browser_host('[::1]:8501') == '::1'
+    assert panel.browser_host('127.0.0.1:8501') == '127.0.0.1'
+    assert panel.browser_host('example.com:8501') == '127.0.0.1'
+    server = LoopbackHTTPServer(('::1', 0), handler(tmp_path), '::1')
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        assert panel.healthy(tmp_path, server.server_address[1], '::1')
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_toolbar_is_fixed_and_shared_by_all_app_pages():
     from pathlib import Path
     from streamlit.testing.v1 import AppTest

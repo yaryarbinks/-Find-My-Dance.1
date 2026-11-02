@@ -23,7 +23,7 @@ st.set_page_config(page_title='Find My Dance', page_icon='🪩', layout='wide')
 bank = feedback.Feedback(DATA / 'feedback.sqlite3')
 projects = Projects(bank.path)
 state = st.session_state
-render_scan_toolbar(st, panel.ensure_panel_server(ROOT, DATA))
+render_scan_toolbar(st, panel.ensure_panel_server(ROOT, DATA, st.context.headers.get('host', '')))
 st.title('🪩 Find My Dance')
 
 routes = {'folders': 'Search and folders', 'review': 'Folder review', 'nearby': 'Nearby photos',

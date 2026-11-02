@@ -3,6 +3,8 @@ import hashlib
 import re
 from pathlib import Path
 
+from festival_finder.projects import sample_id
+
 
 def photo_sequence(report):
     def natural(item):
@@ -22,6 +24,18 @@ def candidate_similarity(item):
     scores = [face['score'] for hit in item.get('hits', []) for face in hit.get('faces', [])
               if face.get('candidate') and isinstance(face.get('score'), (int, float))]
     return max(scores) if scores else None
+
+
+def suggestion_reviewed(item, photo_labels, labels):
+    if item['id'] in photo_labels:
+        return True
+    return any(labels.get(sample_id(item, hit, face)) in {'me', 'not_me'}
+               for hit in item.get('hits', []) for face in hit.get('faces', []))
+
+
+def _reset_review_page(st, mode):
+    key = f'review-page-generation-{mode}'
+    st.session_state[key] = st.session_state.get(key, 0) + 1
 
 
 def nearby_photos(report, confirmed, radius=2):
@@ -93,10 +107,16 @@ def render_photo_page(st, projects, feedback, data, root, mode):
             key='folder-review-view-v2')
         selected_reports = [reports_by_folder[fid] for fid in selected_folders]
         entries = []
+        reviewed = {}
         coverage = []
         for report in sorted(selected_reports, key=lambda row: names.get(row['folder_id'], row.get('selected_folder', ''))):
             items = media_sequence(report)
             photo_labels = projects.photo_labels(report['festival_id'], report['folder_id'])
+            reviewed.update({
+                (report['festival_id'], report['folder_id'], item['id']):
+                    suggestion_reviewed(item, photo_labels, labels)
+                for item in items
+            })
             confirmed_ids = {item['id'] for item in projects.confirmed(report, labels)}
             if view == 'Awaiting review':
                 items = [item for item in items if item['id'] not in photo_labels]
@@ -120,6 +140,9 @@ def render_photo_page(st, projects, feedback, data, root, mode):
                 'Video previews': sum(bool(item.get('video')) for item in all_items),
                 'Errors': len(report.get('errors', [])),
             })
+        if view == 'Saved suggestions':
+            entries.sort(key=lambda entry: reviewed.get(
+                (entry[0]['festival_id'], entry[0]['folder_id'], entry[1]['id']), False))
         total_checked = sum(report.get('processed', 0) for report in selected_reports)
         total_expected = sum(report.get('total_discovered', 0) for report in selected_reports)
         total_errors = sum(len(report.get('errors', [])) for report in selected_reports)
@@ -131,6 +154,8 @@ def render_photo_page(st, projects, feedback, data, root, mode):
                    f'{total_checked} / {total_expected} files checked · {saved_media} saved previews · '
                    f'{suggestion_count} recognition suggestions · {total_errors} file errors. '
                    'No scan or download runs from this page.')
+        if view == 'Saved suggestions':
+            st.caption('Unreviewed suggestions appear first. Confirmed and rejected suggestions move after them; each decision returns the list to the next unreviewed photo.')
         with st.expander('Scan coverage by folder'):
             st.dataframe(coverage, hide_index=True, use_container_width=True)
         if not selected_reports:
@@ -180,7 +205,8 @@ def render_photo_page(st, projects, feedback, data, root, mode):
         st.info('No photos in this view yet.')
         return
     st.caption(f'{len(entries)} item(s) in this view · {(len(entries)+11)//12} review page(s) at 12 per page.')
-    page = st.number_input('Review page (12 items)', 1, max(1, (len(entries)+11)//12), 1, key=f'review-page-{mode}-{len(entries)}')
+    page_key = f"review-page-{mode}-{len(entries)}-{st.session_state.get(f'review-page-generation-{mode}', 0)}"
+    page = st.number_input('Review page (12 items)', 1, max(1, (len(entries)+11)//12), 1, key=page_key)
     for report, item, context in entries[(page-1)*12:page*12]:
         festival_id, folder_id = report['festival_id'], report['folder_id']
         with st.container(border=True):
@@ -197,6 +223,7 @@ def render_photo_page(st, projects, feedback, data, root, mode):
                 if undo.button('Undo', key=f'{widget}-compact-undo'):
                     projects.review_photo(festival_id, folder_id, item['id'], None)
                     st.session_state['photo-review-notice'] = f"Undone: {item['name']}"
+                    _reset_review_page(st, mode)
                     st.rerun()
                 with st.expander('Reopen confirmed photo' if label == 'me' else 'Reopen rejected photo'):
                     if preview:
@@ -209,6 +236,7 @@ def render_photo_page(st, projects, feedback, data, root, mode):
                         projects.review_photo(festival_id, folder_id, item['id'], replacement)
                         decision = 'not in this photo' if replacement == 'not_me' else 'you are in this photo'
                         st.session_state['photo-review-notice'] = f"Saved: {item['name']} — {decision}."
+                        _reset_review_page(st, mode)
                         st.rerun()
                 continue
             st.subheader(item['name'])
@@ -237,4 +265,5 @@ def render_photo_page(st, projects, feedback, data, root, mode):
                     projects.review_photo(festival_id, folder_id, item['id'], value)
                     decision = {'me': 'you are in this photo', 'not_me': 'not in this photo', None: 'photo decision undone'}[value]
                     st.session_state['photo-review-notice'] = f"Saved: {item['name']} — {decision}."
+                    _reset_review_page(st, mode)
                     st.rerun()

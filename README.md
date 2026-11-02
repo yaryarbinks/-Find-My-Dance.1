@@ -4,7 +4,7 @@ A local festival photo browser with manual review and an optional sequential sca
 
 ## Use the app
 
-Run `start.ps1` (Windows) or `./start.sh` (macOS) in this project folder and open http://127.0.0.1:8501.
+Run `start.ps1` (Windows) or `./start.sh` (macOS) in this project folder. On Windows, use the URL printed by the launcher; if port 8501 is already occupied, it selects an available port from 8502–8510.
 
 1. Open a saved festival, or expand **Add a festival / refresh its folder tree** and paste its root Google Drive folder link.
 2. Select a folder in the tree. **Add selected folder + subfolders** adds that folder and every descendant to the scan queue. Multiple selections can be added; duplicates are ignored.
